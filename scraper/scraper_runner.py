@@ -107,7 +107,10 @@ def upsert_product_from_item(db, item, run_id: int):
         product.match_confidence = confidence
         product.updated_at = datetime.utcnow()
         db.commit()
-
+        db.query(PriceHistory).filter(
+        PriceHistory.product_id == product.id,
+        PriceHistory.retailer == retailer
+).delete()
     for observed_at, history_price in history_prices(price, retailer):
         db.add(
             PriceHistory(
