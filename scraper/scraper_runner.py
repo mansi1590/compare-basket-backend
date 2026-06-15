@@ -1,10 +1,20 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from models import PriceHistory, Product, ProductMatch, RawScrapedProduct, ScrapeRun
 from scraper.mock_scraper import MockRetailerScraper
 from scraper.normalizer import canonical_name, match_confidence
 
-RETAILERS = ["Tesco", "ASDA", "Morrisons", "Sainsburys", "M&S"]
+RETAILERS = [
+    "Tesco",
+    "ASDA",
+    "Morrisons",
+    "Sainsburys",
+    "M&S",
+    "DMart",
+    "JioMart",
+    "Blinkit",
+    "BigBasket",
+]
 
 
 def get_value(item, key, default=None):
@@ -13,11 +23,30 @@ def get_value(item, key, default=None):
     return getattr(item, key, default)
 
 
+def history_prices(current_price: float, retailer: str):
+    today = datetime.utcnow()
+    seed = sum(ord(c) for c in retailer) % 7
+
+    points = [
+        (30, current_price + 0.35 + seed * 0.01),
+        (20, current_price + 0.25 + seed * 0.01),
+        (15, current_price + 0.18),
+        (10, current_price + 0.10),
+        (5, current_price + 0.05),
+        (0, current_price),
+    ]
+
+    return [
+        (today - timedelta(days=days), round(max(price, 0.01), 2))
+        for days, price in points
+    ]
+
+
 def upsert_product_from_item(db, item, run_id: int):
     name = get_value(item, "name")
     retailer = get_value(item, "retailer")
     category = get_value(item, "category")
-    price = get_value(item, "price")
+    price = float(get_value(item, "price"))
     loyalty_price = get_value(item, "loyalty_price")
     promotion = get_value(item, "promotion")
     image_url = get_value(item, "image_url")
@@ -79,15 +108,17 @@ def upsert_product_from_item(db, item, run_id: int):
         product.updated_at = datetime.utcnow()
         db.commit()
 
-    db.add(
-        PriceHistory(
-            product_id=product.id,
-            retailer=retailer,
-            price=price,
-            loyalty_price=loyalty_price,
-            promotion=promotion,
+    for observed_at, history_price in history_prices(price, retailer):
+        db.add(
+            PriceHistory(
+                product_id=product.id,
+                retailer=retailer,
+                price=history_price,
+                loyalty_price=loyalty_price,
+                promotion=promotion,
+                observed_at=observed_at,
+            )
         )
-    )
 
     db.add(
         ProductMatch(
