@@ -1,4 +1,6 @@
-from scraper.base_scraper import BaseScraper, ScrapedItem
+from typing import List
+
+from scraper.base_scraper import BaseScraper, ScrapedProduct
 
 POC_IMAGE = {
     "milk": "https://images.unsplash.com/photo-1563636619-e9143da7973b?w=300",
@@ -26,32 +28,40 @@ PRICE_MATRIX = {
     "M&S": [1.80, 1.00, 2.60, 2.20, 4.00, 3.25],
 }
 
-LOYALTY = {
-    "Tesco": "Clubcard",
-    "ASDA": "Rewards",
-    "Morrisons": "More",
-    "Sainsburys": "Nectar",
-    "M&S": "Sparks",
-}
-
 
 class MockRetailerScraper(BaseScraper):
+    country = "uk"
+    currency = "GBP"
+
     def __init__(self, retailer: str):
         self.retailer = retailer
+        self.retailer_name = retailer
 
-    def scrape(self):
+    def fetch_products(self) -> List[ScrapedProduct]:
         prices = PRICE_MATRIX[self.retailer]
+        products: List[ScrapedProduct] = []
+
         for index, (name, category, key) in enumerate(POC_PRODUCTS):
             price = prices[index]
-            loyalty_price = round(price - 0.10, 2) if self.retailer in {"Tesco", "Sainsburys", "Morrisons", "M&S"} else None
-            yield ScrapedItem(
-                name=name,
-                price=price,
-                category=category,
-                retailer=self.retailer,
-                loyalty_price=loyalty_price,
-                promotion="Price matched" if index in {0, 1} else None,
-                image_url=POC_IMAGE[key],
-                product_url=f"https://www.{self.retailer.lower().replace('&','and').replace(' ','')}.com/",
-                affiliate_url=f"https://www.{self.retailer.lower().replace('&','and').replace(' ','')}.com/?utm_source=comparethebasket",
+            loyalty_price = (
+                round(price - 0.10, 2)
+                if self.retailer in {"Tesco", "Sainsburys", "Morrisons", "M&S"}
+                else None
             )
+
+            products.append(
+                ScrapedProduct(
+                    name=name,
+                    retailer=self.retailer,
+                    category=category,
+                    price=price,
+                    currency=self.currency,
+                    country=self.country,
+                    loyalty_price=loyalty_price,
+                    promotion="Price matched" if index in {0, 1} else None,
+                    image_url=POC_IMAGE[key],
+                    product_url=f"https://www.{self.retailer.lower().replace('&','and').replace(' ','')}.com/",
+                )
+            )
+
+        return products
