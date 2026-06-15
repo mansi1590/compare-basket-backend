@@ -15,8 +15,8 @@ def upsert_product_from_item(db, item, run_id: int):
         raw_name=item.name,
         raw_price=item.price,
         category=item.category,
-   size=getattr(item, "size", None),
-unit=getattr(item, "unit", None),
+        size=getattr(item, "size", None),
+        unit=getattr(item, "unit", None),
         product_url=item.product_url,
         image_url=item.image_url,
     )
