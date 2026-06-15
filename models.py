@@ -12,6 +12,8 @@ class Product(Base):
     retailer = Column(String, index=True, nullable=False)
     category = Column(String, index=True, nullable=False)
     price = Column(Float, nullable=False)
+    country = Column(String, index=True, nullable=True)
+    currency = Column(String, nullable=True)
 
     brand = Column(String, nullable=True)
     size = Column(String, nullable=True)

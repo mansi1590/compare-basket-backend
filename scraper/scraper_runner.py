@@ -1,6 +1,13 @@
 from datetime import datetime, timedelta
 
-from models import PriceHistory, Product, ProductMatch, RawScrapedProduct, ScrapeRun
+from models import (
+    PriceHistory,
+    Product,
+    ProductMatch,
+    RawScrapedProduct,
+    RetailerLocation,
+    ScrapeRun,
+)
 from scraper.mock_scraper import MockRetailerScraper
 from scraper.normalizer import canonical_name, match_confidence
 
@@ -16,6 +23,23 @@ RETAILERS = [
     "BigBasket",
 ]
 
+DEMO_LOCATIONS = [
+    ("uk", "cv31", "Royal Leamington Spa", "Warwickshire", "Tesco", "Clubcard"),
+    ("uk", "cv31", "Royal Leamington Spa", "Warwickshire", "ASDA", None),
+    ("uk", "cv31", "Royal Leamington Spa", "Warwickshire", "Morrisons", "More Card"),
+    ("uk", "cv31", "Royal Leamington Spa", "Warwickshire", "Sainsburys", "Nectar"),
+    ("uk", "cv31", "Royal Leamington Spa", "Warwickshire", "M&S", "Sparks"),
+    ("uk", "cv32", "Royal Leamington Spa", "Warwickshire", "Tesco", "Clubcard"),
+    ("uk", "cv32", "Royal Leamington Spa", "Warwickshire", "ASDA", None),
+    ("uk", "cv32", "Royal Leamington Spa", "Warwickshire", "Morrisons", "More Card"),
+    ("uk", "cv32", "Royal Leamington Spa", "Warwickshire", "Sainsburys", "Nectar"),
+    ("uk", "cv32", "Royal Leamington Spa", "Warwickshire", "M&S", "Sparks"),
+    ("india", "400701", "Navi Mumbai", "Airoli", "DMart", "DMart Ready"),
+    ("india", "400701", "Navi Mumbai", "Airoli", "JioMart", "JioMart"),
+    ("india", "400701", "Navi Mumbai", "Airoli", "Blinkit", None),
+    ("india", "400701", "Navi Mumbai", "Airoli", "BigBasket", "BB Star"),
+]
+
 
 def get_value(item, key, default=None):
     if isinstance(item, dict):
@@ -24,9 +48,8 @@ def get_value(item, key, default=None):
 
 
 def history_prices(current_price: float, retailer: str):
-    today = datetime.utcnow()
+    today = datetime.utcnow().replace(hour=9, minute=0, second=0, microsecond=0)
     seed = sum(ord(c) for c in retailer) % 7
-
     points = [
         (30, current_price + 0.35 + seed * 0.01),
         (20, current_price + 0.25 + seed * 0.01),
@@ -35,11 +58,41 @@ def history_prices(current_price: float, retailer: str):
         (5, current_price + 0.05),
         (0, current_price),
     ]
-
     return [
         (today - timedelta(days=days), round(max(price, 0.01), 2))
         for days, price in points
     ]
+
+
+def ensure_demo_locations(db):
+    for country, code, city, area, retailer, loyalty_scheme in DEMO_LOCATIONS:
+        existing = (
+            db.query(RetailerLocation)
+            .filter(
+                RetailerLocation.country.ilike(country),
+                RetailerLocation.code.ilike(code),
+                RetailerLocation.retailer.ilike(retailer),
+            )
+            .first()
+        )
+        if existing:
+            existing.city = city
+            existing.area = area
+            existing.loyalty_scheme = loyalty_scheme
+            existing.is_active = True
+        else:
+            db.add(
+                RetailerLocation(
+                    country=country,
+                    code=code,
+                    city=city,
+                    area=area,
+                    retailer=retailer,
+                    loyalty_scheme=loyalty_scheme,
+                    is_active=True,
+                )
+            )
+    db.commit()
 
 
 def upsert_product_from_item(db, item, run_id: int):
@@ -54,8 +107,15 @@ def upsert_product_from_item(db, item, run_id: int):
     affiliate_url = get_value(item, "affiliate_url")
     size = get_value(item, "size")
     unit = get_value(item, "unit")
+    country = get_value(item, "country", "india" if retailer in {"DMart", "JioMart", "Blinkit", "BigBasket"} else "uk")
+    currency = get_value(item, "currency", "INR" if country == "india" else "GBP")
 
     canonical = canonical_name(name)
+
+    db.query(RawScrapedProduct).filter(
+        RawScrapedProduct.retailer.ilike(retailer),
+        RawScrapedProduct.raw_name.ilike(name),
+    ).delete(synchronize_session=False)
 
     raw = RawScrapedProduct(
         scrape_run_id=run_id,
@@ -86,6 +146,8 @@ def upsert_product_from_item(db, item, run_id: int):
             retailer=retailer,
             category=category,
             price=price,
+            country=country,
+            currency=currency,
             loyalty_price=loyalty_price,
             promotion=promotion,
             image_url=image_url,
@@ -98,7 +160,10 @@ def upsert_product_from_item(db, item, run_id: int):
         db.commit()
         db.refresh(product)
     else:
+        product.category = category
         product.price = price
+        product.country = country
+        product.currency = currency
         product.loyalty_price = loyalty_price
         product.promotion = promotion
         product.image_url = image_url or product.image_url
@@ -107,10 +172,18 @@ def upsert_product_from_item(db, item, run_id: int):
         product.match_confidence = confidence
         product.updated_at = datetime.utcnow()
         db.commit()
-        db.query(PriceHistory).filter(
+        db.refresh(product)
+
+    db.query(PriceHistory).filter(
         PriceHistory.product_id == product.id,
-        PriceHistory.retailer == retailer
-).delete()
+        PriceHistory.retailer.ilike(retailer),
+    ).delete(synchronize_session=False)
+
+    db.query(ProductMatch).filter(
+        ProductMatch.product_id == product.id,
+        ProductMatch.retailer.ilike(retailer),
+    ).delete(synchronize_session=False)
+
     for observed_at, history_price in history_prices(price, retailer):
         db.add(
             PriceHistory(
@@ -138,6 +211,7 @@ def upsert_product_from_item(db, item, run_id: int):
 
 
 def run_mock_pipeline(db):
+    ensure_demo_locations(db)
     total = 0
     runs = []
 
@@ -150,7 +224,6 @@ def run_mock_pipeline(db):
         try:
             scraper = MockRetailerScraper(retailer)
             items = scraper.run()
-
             for item in items:
                 upsert_product_from_item(db, item, run.id)
 
@@ -158,14 +231,12 @@ def run_mock_pipeline(db):
             run.items_found = len(items)
             run.finished_at = datetime.utcnow()
             total += len(items)
-
         except Exception as exc:
             run.status = "failed"
             run.error_message = str(exc)
             run.finished_at = datetime.utcnow()
 
         db.commit()
-
         runs.append(
             {
                 "retailer": retailer,

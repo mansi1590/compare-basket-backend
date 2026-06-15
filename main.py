@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 
 from fastapi import Depends, FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, text
 from sqlalchemy.orm import Session
 
 from database import SessionLocal, engine
@@ -45,6 +45,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+def ensure_runtime_columns():
+    # Railway create_all will not alter existing tables. These safe ALTERs keep older demo DBs compatible.
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE products ADD COLUMN IF NOT EXISTS country VARCHAR"))
+        connection.execute(text("ALTER TABLE products ADD COLUMN IF NOT EXISTS currency VARCHAR"))
+
+
+ensure_runtime_columns()
 Base.metadata.create_all(bind=engine)
 
 
@@ -60,6 +68,17 @@ def parse_retailers(retailers: str) -> list[str]:
     return [r.strip() for r in retailers.split(",") if r.strip()]
 
 
+def normalize_country(country: str = "") -> str:
+    return (country or "").strip().lower()
+
+
+def apply_country_filter(query, country: str = ""):
+    normal_country = normalize_country(country)
+    if normal_country:
+        return query.filter(Product.country.ilike(normal_country))
+    return query
+
+
 def effective_price(product: Product, use_loyalty: bool = False) -> float:
     if use_loyalty and product.loyalty_price is not None:
         return float(product.loyalty_price)
@@ -73,8 +92,8 @@ def apply_retailer_filter(query, retailers: str):
     return query
 
 
-def product_query(db: Session, text: str = "", retailers: str = ""):
-    query = db.query(Product)
+def product_query(db: Session, text: str = "", retailers: str = "", country: str = ""):
+    query = apply_country_filter(db.query(Product), country)
     if text and text.strip():
         query = query.filter(Product.name.ilike(f"%{text.strip()}%"))
     return apply_retailer_filter(query, retailers)
@@ -94,6 +113,7 @@ def to_price_row(product: Product, use_loyalty: bool = False):
         "affiliate_url": product.affiliate_url,
         "image_url": product.image_url,
         "currency": getattr(product, "currency", None),
+        "country": getattr(product, "country", None),
     }
 
 
@@ -123,6 +143,7 @@ def grouped_products_from_rows(products: list[Product], use_loyalty: bool = Fals
                 "promotion": representative.promotion,
                 "updated_at": representative.updated_at,
                 "currency": getattr(representative, "currency", None),
+                "country": getattr(representative, "country", None),
             }
         )
     return sorted(result, key=lambda row: (row["category"], row["name"]))
@@ -167,43 +188,43 @@ def create_product(product: ProductCreate, db: Session = Depends(get_db)):
 
 
 @app.get("/products", response_model=list[ProductResponse])
-def get_products(retailers: str = "", db: Session = Depends(get_db)):
-    return apply_retailer_filter(db.query(Product), retailers).order_by(Product.category, Product.name, Product.price).all()
+def get_products(retailers: str = "", country: str = "", db: Session = Depends(get_db)):
+    return apply_retailer_filter(apply_country_filter(db.query(Product), country), retailers).order_by(Product.category, Product.name, Product.price).all()
 
 
 @app.get("/products/grouped", response_model=list[GroupedProductResponse])
-def get_grouped_products(retailers: str = "", use_loyalty: bool = False, db: Session = Depends(get_db)):
-    products = apply_retailer_filter(db.query(Product), retailers).all()
+def get_grouped_products(retailers: str = "", country: str = "", use_loyalty: bool = False, db: Session = Depends(get_db)):
+    products = apply_retailer_filter(apply_country_filter(db.query(Product), country), retailers).all()
     return grouped_products_from_rows(products, use_loyalty)
 
 
 @app.get("/search", response_model=list[ProductResponse])
-def search_products(query: str, retailers: str = "", db: Session = Depends(get_db)):
-    return product_query(db, query, retailers).order_by(Product.price.asc()).all()
+def search_products(query: str, retailers: str = "", country: str = "", db: Session = Depends(get_db)):
+    return product_query(db, query, retailers, country).order_by(Product.price.asc()).all()
 
 
 @app.get("/search/grouped", response_model=list[GroupedProductResponse])
-def search_products_grouped(query: str = "", retailers: str = "", use_loyalty: bool = False, db: Session = Depends(get_db)):
-    products = product_query(db, query, retailers).all()
+def search_products_grouped(query: str = "", retailers: str = "", country: str = "", use_loyalty: bool = False, db: Session = Depends(get_db)):
+    products = product_query(db, query, retailers, country).all()
     return grouped_products_from_rows(products, use_loyalty)
 
 
 @app.get("/products/category", response_model=list[ProductResponse])
-def get_products_by_category(category: str, retailers: str = "", db: Session = Depends(get_db)):
-    query = db.query(Product).filter(Product.category.ilike(f"%{category}%"))
+def get_products_by_category(category: str, retailers: str = "", country: str = "", db: Session = Depends(get_db)):
+    query = apply_country_filter(db.query(Product), country).filter(Product.category.ilike(f"%{category}%"))
     return apply_retailer_filter(query, retailers).order_by(Product.price.asc()).all()
 
 
 @app.get("/products/category/grouped", response_model=list[GroupedProductResponse])
-def get_products_by_category_grouped(category: str, retailers: str = "", use_loyalty: bool = False, db: Session = Depends(get_db)):
-    query = db.query(Product).filter(Product.category.ilike(f"%{category}%"))
+def get_products_by_category_grouped(category: str, retailers: str = "", country: str = "", use_loyalty: bool = False, db: Session = Depends(get_db)):
+    query = apply_country_filter(db.query(Product), country).filter(Product.category.ilike(f"%{category}%"))
     products = apply_retailer_filter(query, retailers).all()
     return grouped_products_from_rows(products, use_loyalty)
 
 
 @app.get("/compare", response_model=ComparisonResponse)
-def compare_product(product_name: str, retailers: str = "", use_loyalty: bool = False, db: Session = Depends(get_db)):
-    products = product_query(db, product_name, retailers).all()
+def compare_product(product_name: str, retailers: str = "", country: str = "", use_loyalty: bool = False, db: Session = Depends(get_db)):
+    products = product_query(db, product_name, retailers, country).all()
     if not products:
         return {"product": product_name, "prices": [], "cheapest": "Not Found", "saving": 0}
 
@@ -218,8 +239,8 @@ def compare_product(product_name: str, retailers: str = "", use_loyalty: bool = 
 
 
 @app.get("/product/detail", response_model=ProductDetailResponse)
-def product_detail(product_name: str, retailers: str = "", use_loyalty: bool = False, db: Session = Depends(get_db)):
-    products = product_query(db, product_name, retailers).all()
+def product_detail(product_name: str, retailers: str = "", country: str = "", use_loyalty: bool = False, db: Session = Depends(get_db)):
+    products = product_query(db, product_name, retailers, country).all()
     if not products:
         return {"product": product_name, "prices": [], "cheapest": "Not Found", "cheapest_price": 0, "highest_price": 0, "saving": 0}
 
@@ -240,6 +261,7 @@ def product_detail(product_name: str, retailers: str = "", use_loyalty: bool = F
 def get_price_history_by_product_name(
     product_name: str,
     retailers: str = "",
+    country: str = "",
     use_loyalty: bool = False,
     db: Session = Depends(get_db),
 ):
@@ -249,7 +271,7 @@ def get_price_history_by_product_name(
     It matches all Product rows with the same name across selected retailers, then reads
     their PriceHistory records and groups them by retailer.
     """
-    products = product_query(db, product_name, retailers).all()
+    products = product_query(db, product_name, retailers, country).all()
 
     if not products:
         return {"product": product_name, "history": {}}
@@ -263,21 +285,25 @@ def get_price_history_by_product_name(
         .all()
     )
 
-    history: dict[str, list[dict]] = {}
+    history_by_day: dict[str, dict[str, dict]] = {}
 
     for row in rows:
         retailer = row.retailer or "Unknown"
         price = row.loyalty_price if use_loyalty and row.loyalty_price is not None else row.price
+        day_key = row.observed_at.date().isoformat() if row.observed_at else "unknown"
 
-        history.setdefault(retailer, []).append(
-            {
-                "date": row.observed_at,
-                "price": price,
-                "normal_price": row.price,
-                "loyalty_price": row.loyalty_price,
-                "promotion": row.promotion,
-            }
-        )
+        history_by_day.setdefault(retailer, {})[day_key] = {
+            "date": row.observed_at,
+            "price": price,
+            "normal_price": row.price,
+            "loyalty_price": row.loyalty_price,
+            "promotion": row.promotion,
+        }
+
+    history = {
+        retailer: sorted(day_rows.values(), key=lambda item: item["date"])[-6:]
+        for retailer, day_rows in history_by_day.items()
+    }
 
     return {"product": product_name, "history": history}
 
@@ -307,13 +333,13 @@ def get_price_history(product_id: int, db: Session = Depends(get_db)):
 
 
 @app.post("/basket/compare", response_model=BasketCompareResponse)
-def compare_basket(basket: BasketCompareRequest, retailers: str = "", db: Session = Depends(get_db)):
+def compare_basket(basket: BasketCompareRequest, retailers: str = "", country: str = "", db: Session = Depends(get_db)):
     retailer_totals: dict[str, float] = {}
     missing_items: dict[str, list[str]] = {}
     retailer_list = parse_retailers(retailers)
 
     for item in basket.items:
-        products = product_query(db, item, retailers).all()
+        products = product_query(db, item, retailers, country).all()
         found_retailers = {p.retailer for p in products}
         if retailer_list:
             missing = [r for r in retailer_list if r not in found_retailers]
@@ -332,11 +358,11 @@ def compare_basket(basket: BasketCompareRequest, retailers: str = "", db: Sessio
 
 
 @app.post("/basket/smart-recommendation", response_model=SmartBasketResponse)
-def smart_basket_recommendation(basket: BasketCompareRequest, retailers: str = "", db: Session = Depends(get_db)):
+def smart_basket_recommendation(basket: BasketCompareRequest, retailers: str = "", country: str = "", db: Session = Depends(get_db)):
     recommended_items = []
     best_total = 0.0
     for item in basket.items:
-        products = product_query(db, item, retailers).all()
+        products = product_query(db, item, retailers, country).all()
         if not products:
             continue
         cheapest = min(products, key=lambda p: effective_price(p, basket.use_loyalty))
@@ -353,7 +379,7 @@ def smart_basket_recommendation(basket: BasketCompareRequest, retailers: str = "
         )
         best_total += price
 
-    single_retailer = compare_basket(basket, retailers, db)
+    single_retailer = compare_basket(basket, retailers, country, db)
     saving = max(0, round(single_retailer.saving if hasattr(single_retailer, "saving") else single_retailer.get("saving", 0), 2))
     return {"recommended_items": recommended_items, "best_total": round(best_total, 2), "saving": saving}
 
