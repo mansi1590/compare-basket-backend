@@ -112,10 +112,7 @@ def upsert_product_from_item(db, item, run_id: int):
 
     canonical = canonical_name(name)
 
-    db.query(RawScrapedProduct).filter(
-        RawScrapedProduct.retailer.ilike(retailer),
-        RawScrapedProduct.raw_name.ilike(name),
-    ).delete(synchronize_session=False)
+
 
     raw = RawScrapedProduct(
         scrape_run_id=run_id,
